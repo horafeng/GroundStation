@@ -112,6 +112,8 @@ def test_cleared_track_keeps_last_valid_coordinate(repository: TrackRepository, 
     assert cleared.last_valid_coordinate is not None
     assert cleared.last_valid_coordinate.longitude_deg == 121.1
     assert cleared.last_valid_coordinate.received_unix_ms == 1000
+    assert cleared.lost_since_monotonic == pytest.approx(0.0)
+    assert cleared.lost_duration_ms == 1000
 
 
 def test_timeout_marks_lost_and_duration_grows_monotonically(repository: TrackRepository, clock: FakeTime) -> None:
@@ -119,11 +121,12 @@ def test_timeout_marks_lost_and_duration_grows_monotonically(repository: TrackRe
     clock.monotonic = 2.001
     first_lost = repository.get(100)
     assert first_lost is not None and not first_lost.is_realtime
-    assert first_lost.lost_since_monotonic == pytest.approx(2.0)
+    assert first_lost.lost_since_monotonic == pytest.approx(0.0)
+    assert first_lost.lost_duration_ms >= 2000
     clock.monotonic = 2.501
     later = repository.get(100)
     assert later is not None
-    assert later.lost_duration_ms >= 500
+    assert later.lost_duration_ms >= 2500
     assert later.lost_duration_ms > first_lost.lost_duration_ms
 
 
@@ -137,6 +140,40 @@ def test_same_absolute_id_recovers_after_loss(repository: TrackRepository, clock
     assert recovered.lost_since_monotonic is None
     assert recovered.lost_duration_ms == 0
     assert recovered.display_id == 8
+
+
+def test_2300ms_without_update_reports_about_2300ms_not_300ms(
+    repository: TrackRepository, clock: FakeTime
+) -> None:
+    repository.update_observation(
+        observation(100, 7), received_monotonic=0.0, received_unix_ms=1234
+    )
+    clock.monotonic = 2.3
+    lost = repository.get(100)
+    assert lost is not None
+    assert not lost.is_realtime
+    assert lost.lost_duration_ms == pytest.approx(2300, abs=1)
+    assert lost.last_valid_coordinate is not None
+    assert lost.last_valid_coordinate.received_unix_ms == 1234
+
+
+def test_mission_snapshot_propagates_full_time_since_last_valid_coordinate(
+    repository: TrackRepository, clock: FakeTime
+) -> None:
+    repository.update_observation(
+        observation(100, 7), received_monotonic=0.0, received_unix_ms=4321
+    )
+    selection = TargetSelectionService(repository)
+    selection.request_selection(100)
+    mission = MissionStateService(
+        selection, drone_id=1, monotonic_clock=lambda: clock.monotonic
+    )
+    clock.monotonic = 2.3
+    snapshot = mission.build_snapshot(9, generated_unix_ms=9999)
+    assert snapshot.target_valid
+    assert not snapshot.coordinate_realtime
+    assert snapshot.target_lost_duration_ms == pytest.approx(2300, abs=1)
+    assert snapshot.target_coordinate_timestamp_unix_ms == 4321
 
 
 def test_selection_initial_pending_cancel_and_confirm(repository: TrackRepository) -> None:
@@ -223,4 +260,5 @@ def test_mission_keeps_mode_and_last_coordinate_after_clear(repository: TrackRep
     assert snapshot.target_valid
     assert snapshot.target_longitude_deg == 121.1
     assert not snapshot.coordinate_realtime
-    assert snapshot.target_lost_duration_ms == 500
+    assert snapshot.target_lost_duration_ms == 1500
+    assert snapshot.target_coordinate_timestamp_unix_ms == 1000

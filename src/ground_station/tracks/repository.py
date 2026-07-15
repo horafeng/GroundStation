@@ -13,10 +13,12 @@ from ground_station.domain import RadarTrack, RadarTrackFrame
 
 @dataclass(frozen=True, slots=True)
 class LastValidCoordinate:
+    """最后有效坐标同时保存Unix展示时间和丢失计时所需的单调时刻。"""
     longitude_deg: float
     latitude_deg: float
     relative_ground_height_m: float
     received_unix_ms: int
+    received_monotonic: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +33,8 @@ class TrackLifecycleSnapshot:
     is_realtime: bool
     lost_since_monotonic: float | None
     lost_duration_ms: int
+    first_seen_unix_ms: int = 0
+    last_updated_unix_ms: int = 0
 
 
 @dataclass(slots=True)
@@ -43,10 +47,16 @@ class _TrackRecord:
     last_updated_monotonic: float
     radar_marked_cleared: bool
     lost_since_monotonic: float | None
+    first_seen_unix_ms: int
+    last_updated_unix_ms: int
 
 
 class TrackRepository:
-    """维护实时/丢失状态，不进行类型过滤或邻近目标重关联。"""
+    """维护实时/丢失状态，不进行类型过滤或邻近目标重关联。
+
+    超时阈值只触发非实时状态；丢失持续时间从最后有效坐标的
+    ``received_monotonic`` 起算。恢复实时后清零。
+    """
 
     timeout_assumption_notice = TRACK_TIMEOUT_NOTICE
 
@@ -79,6 +89,15 @@ class TrackRepository:
             updated = [self._update_observation(track, mono, unix_ms) for track in frame.tracks]
             return tuple(self._snapshot(record, mono) for record in updated)
 
+    def set_stale_timeout_ms(self, value: int) -> None:
+        """在UI线程中应用新的超时阈值；现有航迹身份和坐标不变。"""
+
+        if value <= 0:
+            raise ValueError("stale_timeout_ms 必须大于0")
+        with self._lock:
+            self.stale_timeout_ms = value
+            self._stale_timeout_s = value / 1000.0
+
     def update_observation(
         self,
         observation: RadarTrack,
@@ -100,6 +119,7 @@ class TrackRepository:
             observation.latitude_deg,
             observation.height_m,
             unix_ms,
+            mono,
         )
         if record is None:
             record = _TrackRecord(
@@ -110,7 +130,11 @@ class TrackRepository:
                 first_seen_monotonic=mono,
                 last_updated_monotonic=mono,
                 radar_marked_cleared=observation.is_cleared,
-                lost_since_monotonic=mono if observation.is_cleared else None,
+                lost_since_monotonic=(
+                    coordinate.received_monotonic if observation.is_cleared else None
+                ),
+                first_seen_unix_ms=unix_ms,
+                last_updated_unix_ms=unix_ms,
             )
             self._records[observation.absolute_id] = record
             return record
@@ -118,10 +142,15 @@ class TrackRepository:
         record.display_id = observation.display_id
         record.latest_observation = observation
         record.last_updated_monotonic = mono
+        record.last_updated_unix_ms = unix_ms
         record.radar_marked_cleared = observation.is_cleared
         if observation.is_cleared:
             if record.lost_since_monotonic is None:
-                record.lost_since_monotonic = mono
+                record.lost_since_monotonic = (
+                    record.last_valid_coordinate.received_monotonic
+                    if record.last_valid_coordinate is not None
+                    else mono
+                )
         else:
             record.last_valid_coordinate = coordinate
             record.lost_since_monotonic = None
@@ -154,7 +183,11 @@ class TrackRepository:
 
     def _apply_timeout(self, record: _TrackRecord, now: float) -> None:
         if record.lost_since_monotonic is None and now - record.last_updated_monotonic > self._stale_timeout_s:
-            record.lost_since_monotonic = record.last_updated_monotonic + self._stale_timeout_s
+            record.lost_since_monotonic = (
+                record.last_valid_coordinate.received_monotonic
+                if record.last_valid_coordinate is not None
+                else record.last_updated_monotonic
+            )
 
     @staticmethod
     def _snapshot(record: _TrackRecord, now: float) -> TrackLifecycleSnapshot:
@@ -175,4 +208,6 @@ class TrackRepository:
             is_realtime=is_realtime,
             lost_since_monotonic=record.lost_since_monotonic,
             lost_duration_ms=lost_ms,
+            first_seen_unix_ms=record.first_seen_unix_ms,
+            last_updated_unix_ms=record.last_updated_unix_ms,
         )

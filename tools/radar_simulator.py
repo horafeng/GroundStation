@@ -25,6 +25,8 @@ SCENARIOS = (
     "zero",
     "one",
     "multi",
+    "multi-moving",
+    "multi-moving-clear",
     "moving",
     "cleared",
     "duplicate-display",

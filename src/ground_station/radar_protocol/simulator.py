@@ -164,6 +164,30 @@ def scenario_datagram(
             SimulatedTrack(9, 200_009, 121.47800, 31.23410, 15, TargetType.UNKNOWN, speed_mps=-0.5),
         ]
         return build_track_datagram(tracks, settings=settings)
+    if scenario in {"multi-moving", "multi-moving-clear"}:
+        tracks = [
+            replace(
+                base,
+                display_id=7,
+                absolute_id=100_007,
+                longitude_deg=109.00700 + tick * 0.00001,
+                latitude_deg=34.11680 + tick * 0.000004,
+                is_cleared=scenario == "multi-moving-clear",
+            ),
+            SimulatedTrack(
+                12, 100_012, 109.00380 - tick * 0.000006, 34.11720,
+                3, TargetType.PERSON, speed_mps=1.6, azimuth_deg=310.0,
+            ),
+            SimulatedTrack(
+                21, 100_021, 109.00850, 34.11350 + tick * 0.000008,
+                0, TargetType.VEHICLE, speed_mps=7.8, azimuth_deg=145.0,
+            ),
+            SimulatedTrack(
+                33, 100_033, 109.00180 + tick * 0.000004, 34.11420 - tick * 0.000003,
+                18, TargetType.UNKNOWN, speed_mps=3.2, azimuth_deg=225.0,
+            ),
+        ]
+        return build_track_datagram(tracks, settings=settings)
     if scenario == "moving":
         moving = replace(
             base,
