@@ -1,0 +1,39 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Test and analysis
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Logs and runtime files
+logs/
+*.log
+*.pid
+
+# Local configuration
+config/local.json
+.env
+
+# Windows
+Thumbs.db
+Desktop.ini
