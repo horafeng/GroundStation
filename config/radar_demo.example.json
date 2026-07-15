@@ -1,0 +1,7 @@
+{
+  "byte_order": "little",
+  "single_frame_per_datagram": true,
+  "demo_assumption_notice": "Demo临时假设，尚未经过真实雷达抓包或实物验证",
+  "target_height_reference": "relative_ground_unverified",
+  "target_height_notice": "目标高度暂按相对地面高度、单位米处理，待实物核对"
+}

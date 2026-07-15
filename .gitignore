@@ -5,6 +5,7 @@ __pycache__/
 *.so
 
 # Virtual environment
+.runtime/
 .venv/
 venv/
 env/

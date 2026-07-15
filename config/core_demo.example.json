@@ -1,0 +1,8 @@
+{
+  "track_stale_timeout_ms": 2000,
+  "send_frequency_hz": 5.0,
+  "drone_id": 1,
+  "drone_host": "127.0.0.1",
+  "drone_port": 7000,
+  "track_timeout_notice": "Demo临时假设，航迹未更新超过2000ms判定为丢失，尚未经过真实雷达更新频率验证"
+}
