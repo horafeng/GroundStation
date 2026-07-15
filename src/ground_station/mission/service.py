@@ -41,6 +41,17 @@ class MissionStateService:
         with self._lock:
             return self._mode
 
+    @property
+    def drone_id(self) -> int:
+        with self._lock:
+            return self._drone_id
+
+    def set_drone_id(self, drone_id: int) -> None:
+        if not 0 <= drone_id <= 0xFFFFFFFF:
+            raise ValueError("drone_id 必须在uint32范围")
+        with self._lock:
+            self._drone_id = drone_id
+
     def set_mode(self, mode: MissionMode | int) -> ImmediateSendEvent | None:
         new_mode = MissionMode(mode)
         with self._lock:

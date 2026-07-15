@@ -30,6 +30,7 @@ class SendRecord:
     reason: str
     sent_monotonic: float
     byte_count: int
+    payload: bytes = b""
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +168,7 @@ class MissionSendScheduler:
             snapshot = self._snapshot_factory(sequence)
             payload = self._encoder.encode(snapshot)
             byte_count = self._transport.send(payload)
-            record = SendRecord(sequence, kind, reason, self._clock(), byte_count)
+            record = SendRecord(sequence, kind, reason, self._clock(), byte_count, payload)
             self.send_records.append(record)
             if self._on_sent is not None:
                 self._on_sent(record)

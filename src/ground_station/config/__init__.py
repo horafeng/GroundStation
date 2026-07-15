@@ -8,4 +8,8 @@ __all__ = [
     "DEMO_ASSUMPTION_NOTICE",
     "RadarProtocolSettings",
     "TRACK_TIMEOUT_NOTICE",
+    "ConfigLoadResult",
+    "DemoAppSettings",
+    "load_demo_app_settings",
 ]
+from .app import ConfigLoadResult, DemoAppSettings, load_demo_app_settings
