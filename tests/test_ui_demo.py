@@ -5,7 +5,7 @@ import time
 
 import pytest
 from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtWidgets import QApplication, QDialogButtonBox, QPushButton, QSizePolicy
+from PyQt5.QtWidgets import QApplication, QDialogButtonBox, QLabel, QPushButton, QSizePolicy
 
 from ground_station.config import DemoAppSettings
 from ground_station.domain import MissionMode
@@ -77,11 +77,12 @@ def test_main_window_can_create_and_close_offscreen(qtbot) -> None:
 def test_layout_gives_logs_and_track_table_expandable_space(qtbot) -> None:
     window = make_window(qtbot)
     QApplication.processEvents()
-    assert window.main_splitter.count() == 2
-    assert window.log_tabs.minimumHeight() >= 200
-    assert window.main_splitter.sizes()[1] >= 180
-    assert window.left_splitter.count() == 2
-    assert window.track_table.minimumHeight() >= 190
+    assert window.main_splitter.count() == 3
+    assert window.log_tabs.minimumHeight() >= 140
+    assert window.business_splitter.count() == 2
+    assert window.right_splitter.count() == 4
+    assert window.workspace.stack.count() == 2
+    assert window.track_table.minimumHeight() >= 145
     assert window.track_table.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
     assert window.findChild(QPushButton, "locateCurrentTargetButton") is None
     assert "source" in window.config_summary
@@ -141,7 +142,7 @@ def test_first_selection_and_table_radar_sync(qtbot) -> None:
     decision = window.controller.request_selection(100_007)
     assert decision.status is SelectionStatus.SELECTED
     assert window.controller.selection.selected_absolute_id == 100_007
-    assert window.radar_display.selected_absolute_id == 100_007
+    assert window.workspace.map_model.selected_absolute_id == 100_007
     selected_rows = window.track_table.selectionModel().selectedRows()
     assert len(selected_rows) == 1
     selected_item = window.track_table.item(selected_rows[0].row(), 0)
@@ -159,7 +160,7 @@ def test_target_switch_cancel_then_confirm(qtbot, monkeypatch) -> None:
     monkeypatch.setattr(window, "_confirm_target_switch", lambda _: True)
     window.select_target(100_012)
     assert window.controller.selection.selected_absolute_id == 100_012
-    assert window.radar_display.selected_absolute_id == 100_012
+    assert window.workspace.map_model.selected_absolute_id == 100_012
     window.close()
 
 
@@ -310,10 +311,10 @@ def test_radar_click_and_sorted_table_keep_absolute_id_selection(qtbot, monkeypa
     window = make_window(qtbot)
     window.controller.process_radar_frame(parsed_frame())
     window.track_table.sortItems(1, Qt.DescendingOrder)
-    window.radar_display.track_clicked.emit(100_007)
+    window.workspace.target_clicked.emit(100_007)
     assert window.controller.selection.selected_absolute_id == 100_007
     monkeypatch.setattr(window, "_confirm_target_switch", lambda _: True)
-    window.radar_display.track_clicked.emit(100_012)
+    window.workspace.target_clicked.emit(100_012)
     assert window.controller.selection.selected_absolute_id == 100_012
     selected_rows = window.track_table.selectionModel().selectedRows()
     current = window.track_table.item(selected_rows[0].row(), 0)
@@ -327,8 +328,13 @@ def test_network_settings_dialog_is_usable_and_applies_live_timeout(qtbot) -> No
     dialog = window.settings_dialog
     qtbot.waitUntil(dialog.isVisible)
     assert dialog.minimumWidth() >= 560
-    assert dialog.tabs.count() == 3
+    assert dialog.tabs.count() == 2
+    assert dialog.system_tabs.count() == 5
+    assert "尚不可用" in dialog.calibration_page.findChild(
+        QLabel, "calibrationUnavailableMessage"
+    ).text()
     assert_tab_bar_uses_dark_background(dialog.tabs)
+    assert_tab_bar_uses_dark_background(dialog.system_tabs)
     for control in (
         dialog.radar_host,
         dialog.radar_port,

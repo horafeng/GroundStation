@@ -9,7 +9,6 @@ from PyQt5.QtCore import QItemSelectionModel, Qt, QTimer
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
-    QComboBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -34,10 +33,13 @@ from ground_station.network import RadarReceiverConfig
 from ground_station.selection import SelectionStatus, TargetSwitchConfirmation
 from ground_station.sending import SendError, SendRecord
 from ground_station.tracks import TrackLifecycleSnapshot
+from ground_station.video import VideoSourceConfig
 
 from .controller import GroundStationController
+from .main_workspace import MainWorkspace
 from .settings_dialog import NetworkSettingsDialog
-from .widgets import CappedLogEdit, NumericTableItem, RadarDisplayWidget
+from .theme import DARK_THEME_QSS
+from .widgets import CappedLogEdit, NumericTableItem
 
 TARGET_TYPE_NAMES = {
     0: "未知",
@@ -56,39 +58,6 @@ MODE_NAMES = {
     MissionMode.RETURN_HOME: "返航",
     MissionMode.LAND: "降落",
 }
-
-
-DARK_THEME_QSS = """
-QMainWindow, QDialog, QWidget { background:#13212c; color:#e7eef2; }
-QGroupBox { border:1px solid #365263; border-radius:4px; margin-top:7px; padding-top:8px; font-weight:600; }
-QGroupBox::title { subcontrol-origin:margin; left:8px; padding:0 4px; color:#e7eef2; }
-QLabel { color:#e7eef2; }
-QPushButton { background:#27485c; color:#edf5f8; border:1px solid #52758a; padding:6px 10px; border-radius:3px; min-height:20px; }
-QPushButton:hover { background:#326078; border-color:#79a5bb; }
-QPushButton:checked { background:#bb7228; border-color:#ffc16b; color:#ffffff; }
-QPushButton:disabled { background:#1b2d38; color:#8295a0; border-color:#314854; }
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTableWidget, QPlainTextEdit {
-    background:#0e1a23; color:#e7eef2; border:1px solid #365263; selection-background-color:#8c5a27;
-    selection-color:#ffffff;
-}
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border:1px solid #79a5bb; }
-QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled { background:#172630; color:#8295a0; }
-QComboBox QAbstractItemView { background:#172b37; color:#e7eef2; selection-background-color:#326078; }
-QHeaderView::section { background:#203746; color:#e7eef2; padding:5px; border:1px solid #365263; }
-QTableWidget { gridline-color:#294653; alternate-background-color:#12232e; }
-QTableWidget::item:selected { background:#8c5a27; color:#ffffff; }
-QTabWidget::pane { background:#0e1a23; border:1px solid #365263; top:-1px; }
-QTabBar::tab { background:#1b303e; color:#dce8ed; border:1px solid #365263; border-bottom:2px solid #365263; padding:7px 14px; min-height:20px; }
-QTabBar::tab:selected { background:#27485c; color:#ffc16b; border-bottom:3px solid #e3943a; }
-QTabBar::tab:hover:!selected { background:#274454; color:#ffffff; }
-QTabBar::tab:disabled { background:#172630; color:#8295a0; }
-QScrollBar:vertical { background:#10212b; width:12px; margin:0; }
-QScrollBar:horizontal { background:#10212b; height:12px; margin:0; }
-QScrollBar::handle { background:#456779; border:2px solid #10212b; border-radius:4px; min-height:24px; min-width:24px; }
-QScrollBar::handle:hover { background:#5c879c; }
-QScrollBar::add-line, QScrollBar::sub-line { width:0; height:0; }
-QSplitter::handle { background:#365263; }
-"""
 
 
 class GroundStationMainWindow(QMainWindow):
@@ -118,10 +87,15 @@ class GroundStationMainWindow(QMainWindow):
         self._tracks: tuple[TrackLifecycleSnapshot, ...] = ()
         self._updating_table = False
         self.closed_cleanly = False
-        self.setWindowTitle("无人机地面站 Demo — 雷达航迹与任务发送")
+        self.setWindowTitle("无人机地面站 Demo — 地图主视角")
         self.resize(1600, 920)
         self.setMinimumSize(1120, 700)
         self._build_ui()
+        self.workspace.configure_video(
+            VideoSourceConfig(settings.video_source_mode, settings.video_rtsp_url)
+        )
+        self.status_labels["map"].setText(self.workspace.map_widget.status_label.text())
+        self.status_labels["video"].setText(self.workspace.video_main.message.text())
         self._connect_signals()
         self._apply_style()
         self._timer = QTimer(self)
@@ -142,31 +116,33 @@ class GroundStationMainWindow(QMainWindow):
 
         self.main_splitter = QSplitter(Qt.Vertical)
         self.main_splitter.setObjectName("mainContentLogSplitter")
-        horizontal = QSplitter(Qt.Horizontal)
-        horizontal.setObjectName("businessSplitter")
-        self.left_splitter = QSplitter(Qt.Vertical)
-        self.left_splitter.setObjectName("radarTrackSplitter")
-        self.left_splitter.addWidget(self._build_radar_panel())
-        self.left_splitter.addWidget(self._build_track_table())
-        self.left_splitter.setStretchFactor(0, 13)
-        self.left_splitter.setStretchFactor(1, 7)
-        self.left_splitter.setSizes([370, 260])
-        horizontal.addWidget(self.left_splitter)
+        self.business_splitter = QSplitter(Qt.Horizontal)
+        self.business_splitter.setObjectName("businessSplitter")
+        self.workspace = MainWorkspace(
+            online_map=self.settings.map_mode == "online",
+            tile_url=self.settings.map_tile_url,
+            history_limit=self.settings.map_track_history_points,
+        )
+        self.workspace.setMinimumHeight(260)
+        self.business_splitter.addWidget(self.workspace)
 
-        right = QSplitter(Qt.Vertical)
-        right.addWidget(self._build_radar_info())
-        right.addWidget(self._build_target_details())
-        right.addWidget(self._build_mode_panel())
-        right.addWidget(self._build_network_panel())
-        right.setMinimumWidth(405)
-        horizontal.addWidget(right)
-        horizontal.setStretchFactor(0, 4)
-        horizontal.setStretchFactor(1, 2)
-        self.main_splitter.addWidget(horizontal)
+        self.right_splitter = QSplitter(Qt.Vertical)
+        self.right_splitter.addWidget(self._build_radar_info())
+        self.right_splitter.addWidget(self._build_target_details())
+        self.right_splitter.addWidget(self._build_mode_panel())
+        self.right_splitter.addWidget(self._build_network_panel())
+        self.right_splitter.setMinimumWidth(390)
+        self.right_splitter.setMaximumWidth(500)
+        self.business_splitter.addWidget(self.right_splitter)
+        self.business_splitter.setStretchFactor(0, 5)
+        self.business_splitter.setStretchFactor(1, 2)
+        self.main_splitter.addWidget(self.business_splitter)
+        self.main_splitter.addWidget(self._build_track_table())
         self.main_splitter.addWidget(self._build_logs())
-        self.main_splitter.setStretchFactor(0, 4)
-        self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([680, 220])
+        self.main_splitter.setStretchFactor(0, 6)
+        self.main_splitter.setStretchFactor(1, 2)
+        self.main_splitter.setStretchFactor(2, 2)
+        self.main_splitter.setSizes([560, 220, 180])
         root.addWidget(self.main_splitter, 1)
         self.setCentralWidget(central)
 
@@ -189,6 +165,9 @@ class GroundStationMainWindow(QMainWindow):
             ("frequency", "实际频率", "0.00 Hz"),
             ("local_success", "本机发送成功", "0"),
             ("local_failure", "本机发送失败", "0"),
+            ("target", "当前目标", "无效"),
+            ("map", "地图状态", "本地Demo地图"),
+            ("video", "视频状态", "未连接"),
         ]
         for index, (key, title, value) in enumerate(definitions):
             cell = QWidget()
@@ -207,33 +186,14 @@ class GroundStationMainWindow(QMainWindow):
         self.status_labels["send"].setToolTip(udp_tip)
         self.status_labels["local_success"].setToolTip(udp_tip)
         self.status_labels["ack"].setToolTip(udp_tip)
-        return box
-
-    def _build_radar_panel(self) -> QWidget:
-        box = QGroupBox("离线二维雷达显示")
-        layout = QVBoxLayout(box)
-        range_row = QHBoxLayout()
-        range_row.addWidget(QLabel("固定量程："))
-        self.range_combo = QComboBox()
-        self.range_combo.setObjectName("rangeCombo")
-        for value, label in ((500, "500 m"), (1000, "1 km"), (2000, "2 km"), (5000, "5 km")):
-            self.range_combo.addItem(label, value)
-        self.range_combo.setCurrentIndex(self.range_combo.findData(self.settings.radar_display_range_m))
-        range_row.addWidget(self.range_combo)
-        note = QLabel("局部平面换算仅用于Demo展示")
-        note.setStyleSheet("color:#d3a84e")
-        range_row.addWidget(note)
-        range_row.addStretch()
-        layout.addLayout(range_row)
-        self.radar_display = RadarDisplayWidget()
-        self.radar_display.setObjectName("radarDisplay")
-        self.radar_display.set_range_m(self.settings.radar_display_range_m)
-        layout.addWidget(self.radar_display, 1)
+        self.quick_settings_button = QPushButton("系统设置...")
+        self.quick_settings_button.setMinimumHeight(32)
+        layout.addWidget(self.quick_settings_button, 2, 5, 1, 2)
         return box
 
     def _build_track_table(self) -> QWidget:
         box = QGroupBox("航迹列表（内部始终按绝对编号关联）")
-        box.setMinimumHeight(230)
+        box.setMinimumHeight(160)
         layout = QVBoxLayout(box)
         layout.setContentsMargins(7, 12, 7, 7)
         layout.setSpacing(4)
@@ -249,7 +209,7 @@ class GroundStationMainWindow(QMainWindow):
         self.track_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.track_table.setSortingEnabled(True)
         self.track_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.track_table.setMinimumHeight(190)
+        self.track_table.setMinimumHeight(145)
         self.track_table.setAlternatingRowColors(True)
         self.track_table.verticalHeader().setVisible(False)
         header = self.track_table.horizontalHeader()
@@ -353,20 +313,24 @@ class GroundStationMainWindow(QMainWindow):
             edit.setObjectName(f"log_{key}")
             self.logs[key] = edit
             self.log_tabs.addTab(edit, title)
-        self.log_tabs.setMinimumHeight(200)
+        self.log_tabs.setMinimumHeight(140)
         self.log_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         return self.log_tabs
 
     def _connect_signals(self) -> None:
-        self.range_combo.currentIndexChanged.connect(
-            lambda: self.radar_display.set_range_m(int(self.range_combo.currentData()))
+        self.workspace.target_clicked.connect(self.select_target)
+        self.workspace.map_status_changed.connect(
+            lambda text: self.status_labels["map"].setText(text)
         )
-        self.radar_display.track_clicked.connect(self.select_target)
+        self.workspace.view_changed.connect(
+            lambda text: self._append_log("runtime", f"主视角切换：{text}")
+        )
         self.track_table.itemSelectionChanged.connect(self._table_selection_changed)
         self.mode_group.buttonClicked[int].connect(self._mode_clicked)
         self.radar_toggle.clicked.connect(self._toggle_radar)
         self.send_toggle.clicked.connect(self._toggle_sending)
         self.settings_button.clicked.connect(self._open_settings)
+        self.quick_settings_button.clicked.connect(self._open_settings)
         self.settings_dialog.settings_applied.connect(self._apply_settings)
         self.controller.tracks_changed.connect(self._update_tracks)
         self.controller.radar_state_changed.connect(self._update_radar_state)
@@ -424,8 +388,18 @@ class GroundStationMainWindow(QMainWindow):
 
     def _apply_settings(self) -> None:
         self.controller.repository.set_stale_timeout_ms(self.timeout_ms.value())
+        online = self.settings_dialog.map_mode.currentData() == "online"
+        self.workspace.set_online_map(online)
+        self.workspace.set_tile_url(self.settings_dialog.map_tile_url.text().strip())
+        self.workspace.set_history_limit(self.settings_dialog.map_history_points.value())
+        video_config = VideoSourceConfig(
+            mode=str(self.settings_dialog.video_mode.currentData()),
+            rtsp_url=self.settings_dialog.video_rtsp_url.text().strip(),
+        )
+        self.workspace.configure_video(video_config)
+        self.status_labels["video"].setText(self.workspace.video_main.message.text())
         self._update_config_summary()
-        messages = ["航迹超时阈值已立即应用"]
+        messages = ["航迹超时阈值、地图与视频展示设置已立即应用"]
         if self.controller.radar_receiver.running:
             messages.append("雷达监听相关设置需停止并重新启动监听后生效")
         if self.controller.sending:
@@ -486,13 +460,13 @@ class GroundStationMainWindow(QMainWindow):
         self.radar_labels["sat"].setText(str(radar.satellite_count))
         timestamp = self._format_unix_ms(self.controller.last_radar_state_unix_ms)
         self.radar_labels["updated"].setText(timestamp)
-        self.radar_display.set_radar_position(radar.longitude_deg, radar.latitude_deg)
+        self.workspace.set_home(radar.longitude_deg, radar.latitude_deg)
 
     def _update_tracks(self, tracks: object) -> None:
         self._tracks = tuple(tracks)  # type: ignore[arg-type]
         selected = self.controller.selection.selected_absolute_id
-        self.radar_display.set_tracks(self._tracks)
-        self.radar_display.set_selected_absolute_id(selected)
+        self.workspace.update_tracks(self._tracks)
+        self.workspace.set_selected_track(selected)
         vertical_position = self.track_table.verticalScrollBar().value()
         horizontal_position = self.track_table.horizontalScrollBar().value()
         self._updating_table = True
@@ -582,7 +556,10 @@ class GroundStationMainWindow(QMainWindow):
 
     def _sync_selection(self, absolute_id: object, *, scroll: bool = False) -> None:
         selected = None if absolute_id is None else int(absolute_id)
-        self.radar_display.set_selected_absolute_id(selected)
+        self.workspace.set_selected_track(selected)
+        self.status_labels["target"].setText(
+            "无效" if selected is None else f"绝对编号 {selected}"
+        )
         vertical_position = self.track_table.verticalScrollBar().value()
         horizontal_position = self.track_table.horizontalScrollBar().value()
         self._updating_table = True
@@ -674,7 +651,9 @@ class GroundStationMainWindow(QMainWindow):
 
     def closeEvent(self, event: object) -> None:
         self._timer.stop()
-        self.closed_cleanly = self.controller.shutdown()
+        workspace_ok = self.workspace.shutdown()
+        controller_ok = self.controller.shutdown()
+        self.closed_cleanly = workspace_ok and controller_ok
         event.accept()  # type: ignore[attr-defined]
 
     def _apply_style(self) -> None:

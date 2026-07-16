@@ -11,5 +11,12 @@
   "send_frequency_hz": 5.0,
   "track_stale_timeout_ms": 2000,
   "radar_display_range_m": 1000,
-  "log_max_lines": 1000
+  "log_max_lines": 1000,
+  "map_mode": "local_demo",
+  "map_tile_url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  "map_track_history_points": 60,
+  "video_source_mode": "disabled",
+  "video_rtsp_url": "",
+  "image_directory": "snapshots",
+  "recording_directory": "recordings"
 }
