@@ -61,6 +61,8 @@ class GroundStationController(QObject):
         self.radar_receiver.network_error.connect(self._on_radar_network_error)
         self.latest_radar_frame = None
         self.last_radar_unix_ms: int | None = None
+        self.last_radar_state_unix_ms: int | None = None
+        self.last_radar_datagram_monotonic: float | None = None
         self.valid_radar_frames = 0
         self.invalid_radar_frames = 0
         self.send_success_count = 0
@@ -83,6 +85,9 @@ class GroundStationController(QObject):
 
     def start_radar(self, config: RadarReceiverConfig) -> None:
         self.radar_status_changed.emit("启动中")
+        self.last_radar_unix_ms = None
+        self.last_radar_state_unix_ms = None
+        self.last_radar_datagram_monotonic = None
         self.runtime_log.emit(
             f"启动雷达监听 {config.listen_host}:{config.listen_port}；"
             f"Demo临时假设 byte_order={config.byte_order}, 一报一帧={config.single_frame_per_datagram}"
@@ -91,7 +96,7 @@ class GroundStationController(QObject):
 
     def stop_radar(self) -> bool:
         if not self.radar_receiver.running:
-            self.radar_status_changed.emit("已停止")
+            self.radar_status_changed.emit("未启动")
             return True
         self.radar_status_changed.emit("停止中")
         stopped = self.radar_receiver.stop(2000)
@@ -111,6 +116,8 @@ class GroundStationController(QObject):
         unix_ms = time.time_ns() // 1_000_000 if received_unix_ms is None else received_unix_ms
         self.latest_radar_frame = frame
         self.last_radar_unix_ms = unix_ms
+        self.last_radar_state_unix_ms = unix_ms
+        self.last_radar_datagram_monotonic = mono
         self.valid_radar_frames += 1
         self.repository.update_frame(  # type: ignore[arg-type]
             frame, received_monotonic=mono, received_unix_ms=unix_ms
@@ -124,6 +131,19 @@ class GroundStationController(QObject):
         tracks = self.repository.refresh()
         self.tracks_changed.emit(tracks)
         return tracks
+
+    def radar_data_age_seconds(self, now_monotonic: float | None = None) -> float | None:
+        received = self.last_radar_datagram_monotonic
+        if received is None:
+            return None
+        now = time.monotonic() if now_monotonic is None else now_monotonic
+        return max(0.0, now - received)
+
+    def radar_data_status(self, now_monotonic: float | None = None) -> str:
+        age = self.radar_data_age_seconds(now_monotonic)
+        if age is None:
+            return "尚未收到数据"
+        return "数据实时" if age * 1000 <= self.repository.stale_timeout_ms else "数据超时"
 
     def request_selection(self, absolute_id: int) -> SelectionDecision:
         decision = self.selection.request_selection(absolute_id)
@@ -202,11 +222,11 @@ class GroundStationController(QObject):
             scheduler.request_immediate(event)
 
     def _on_radar_started(self, host: str, port: int) -> None:
-        self.radar_status_changed.emit("接收中")
+        self.radar_status_changed.emit("监听中")
         self.runtime_log.emit(f"雷达UDP已绑定 {host}:{port}")
 
     def _on_radar_stopped(self) -> None:
-        self.radar_status_changed.emit("已停止")
+        self.radar_status_changed.emit("未启动")
 
     def _on_radar_frame(
         self,
@@ -230,18 +250,19 @@ class GroundStationController(QObject):
         error: object,
         _source_host: str,
         _source_port: int,
-        _mono: float,
+        mono: float,
         unix_ms: int,
         payload: bytes,
     ) -> None:
         self.invalid_radar_frames += 1
         self.last_radar_unix_ms = unix_ms
+        self.last_radar_datagram_monotonic = mono
         self.protocol_error_logged.emit(error)
         self.radar_frame_logged.emit(f"拒绝 {payload.hex(' ').upper()}")
 
     def _on_radar_network_error(self, error: object) -> None:
         self.protocol_error_logged.emit(error)
-        self.radar_status_changed.emit("网络错误")
+        self.radar_status_changed.emit("监听错误")
 
     def _on_send_record_worker(self, record: SendRecord) -> None:
         self._send_worker_record.emit(record)

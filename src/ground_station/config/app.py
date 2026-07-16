@@ -23,6 +23,13 @@ class DemoAppSettings:
     track_stale_timeout_ms: int = 2000
     radar_display_range_m: int = 1000
     log_max_lines: int = 1000
+    map_mode: str = "local_demo"
+    map_tile_url: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    map_track_history_points: int = 60
+    video_source_mode: str = "disabled"
+    video_rtsp_url: str = ""
+    image_directory: str = "snapshots"
+    recording_directory: str = "recordings"
 
     def __post_init__(self) -> None:
         if not self.radar_listen_host:
@@ -45,6 +52,12 @@ class DemoAppSettings:
             raise ValueError("radar_display_range_m必须为500/1000/2000/5000")
         if self.log_max_lines < 100:
             raise ValueError("log_max_lines至少为100")
+        if self.map_mode not in ("local_demo", "online"):
+            raise ValueError("map_mode只能为local_demo或online")
+        if not 2 <= self.map_track_history_points <= 1000:
+            raise ValueError("map_track_history_points必须在2..1000")
+        if self.video_source_mode not in ("disabled", "test_pattern", "rtsp"):
+            raise ValueError("video_source_mode无效")
 
 
 @dataclass(frozen=True, slots=True)

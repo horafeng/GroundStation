@@ -5,24 +5,19 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QItemSelectionModel, Qt, QTimer
 from PyQt5.QtWidgets import (
     QAbstractItemView,
-    QButtonGroup,
-    QComboBox,
-    QDoubleSpinBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QSpinBox,
-    QSplitter,
-    QTabWidget,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -35,9 +30,14 @@ from ground_station.network import RadarReceiverConfig
 from ground_station.selection import SelectionStatus, TargetSwitchConfirmation
 from ground_station.sending import SendError, SendRecord
 from ground_station.tracks import TrackLifecycleSnapshot
+from ground_station.video import VideoSourceConfig
 
 from .controller import GroundStationController
-from .widgets import CappedLogEdit, NumericTableItem, RadarDisplayWidget
+from .main_workspace import MainWorkspace
+from .runtime_inspection_dialog import RuntimeInspectionDialog
+from .settings_dialog import NetworkSettingsDialog
+from .theme import DARK_THEME_QSS
+from .widgets import CappedLogEdit, NumericTableItem
 
 TARGET_TYPE_NAMES = {
     0: "未知",
@@ -69,13 +69,32 @@ class GroundStationMainWindow(QMainWindow):
         super().__init__()
         self.settings = settings
         self.controller = controller or GroundStationController(settings, self)
+        self.settings_dialog = NetworkSettingsDialog(settings, self)
+        # 保留既有公开控件属性，设置控件现归属于独立对话框。
+        self.radar_host = self.settings_dialog.radar_host
+        self.radar_port = self.settings_dialog.radar_port
+        self.radar_source_host = self.settings_dialog.radar_source_host
+        self.radar_source_port = self.settings_dialog.radar_source_port
+        self.drone_host = self.settings_dialog.drone_host
+        self.drone_port = self.settings_dialog.drone_port
+        self.drone_id = self.settings_dialog.drone_id
+        self.frequency = self.settings_dialog.frequency
+        self.timeout_ms = self.settings_dialog.timeout_ms
+        self.byte_order = self.settings_dialog.byte_order
+        self.single_frame = self.settings_dialog.single_frame
         self._tracks: tuple[TrackLifecycleSnapshot, ...] = ()
         self._updating_table = False
+        self._last_radar_data_status = "尚未收到数据"
         self.closed_cleanly = False
-        self.setWindowTitle("无人机地面站 Demo — 雷达航迹与任务发送")
+        self.setWindowTitle("无人机地面站 Demo — 地图主视角")
         self.resize(1600, 920)
         self.setMinimumSize(1120, 700)
         self._build_ui()
+        self.workspace.configure_video(
+            VideoSourceConfig(settings.video_source_mode, settings.video_rtsp_url)
+        )
+        self.status_labels["map"].setText(self.workspace.map_widget.status_label.text())
+        self.status_labels["video"].setText(self.workspace.video_main.message.text())
         self._connect_signals()
         self._apply_style()
         self._timer = QTimer(self)
@@ -90,87 +109,118 @@ class GroundStationMainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(5)
         root.addWidget(self._build_status_bar())
+        self.workspace = MainWorkspace(
+            online_map=self.settings.map_mode == "online",
+            tile_url=self.settings.map_tile_url,
+            history_limit=self.settings.map_track_history_points,
+        )
+        self.workspace.setMinimumHeight(480)
+        self.mode_group = self.workspace.mode_group
+        self.mode_buttons = self.workspace.mode_buttons
+        root.addWidget(self.workspace, 1)
 
-        horizontal = QSplitter(Qt.Horizontal)
-        left = QSplitter(Qt.Vertical)
-        left.addWidget(self._build_radar_panel())
-        left.addWidget(self._build_track_table())
-        left.setStretchFactor(0, 3)
-        left.setStretchFactor(1, 2)
-        horizontal.addWidget(left)
-
-        right = QSplitter(Qt.Vertical)
-        right.addWidget(self._build_radar_info())
-        right.addWidget(self._build_target_details())
-        right.addWidget(self._build_mode_panel())
-        right.addWidget(self._build_network_panel())
-        right.setMinimumWidth(390)
-        horizontal.addWidget(right)
-        horizontal.setStretchFactor(0, 4)
-        horizontal.setStretchFactor(1, 2)
-        root.addWidget(horizontal, 1)
-        root.addWidget(self._build_logs(), 0)
+        self._create_logs()
+        self.runtime_inspection = RuntimeInspectionDialog(
+            self._build_track_inspection_page(),
+            self._build_communication_page(),
+            self.logs,
+            self,
+        )
+        # 保留已有测试和外部脚本使用的属性名，实际页签现位于运行检查窗口。
+        self.log_tabs = self.runtime_inspection.tabs
         self.setCentralWidget(central)
 
     def _build_status_bar(self) -> QWidget:
-        box = QGroupBox("运行状态")
-        layout = QGridLayout(box)
+        box = QWidget()
+        box.setObjectName("compactStatusBar")
+        layout = QHBoxLayout(box)
+        layout.setContentsMargins(10, 6, 8, 6)
+        layout.setSpacing(14)
         self.status_labels: dict[str, QLabel] = {}
         definitions = [
-            ("radar", "雷达UDP", "已停止"),
-            ("radar_time", "最近雷达报文", "--"),
-            ("valid", "有效帧", "0"),
-            ("invalid", "错误帧", "0"),
-            ("send", "无人机UDP", "已停止"),
-            ("mode", "当前模式", "待命(0)"),
-            ("sequence", "发送序号", "--"),
-            ("send_time", "最近发送时间", "--"),
-            ("frequency", "实际频率", "0.00 Hz"),
-            ("success", "成功/失败", "0 / 0"),
+            ("radar", "雷达监听", "未启动"),
+            ("radar_data", "雷达数据", "尚未收到数据"),
+            ("send", "无人机UDP", "已停止（无接收确认）"),
+            ("mode", "模式", "待命"),
+            ("target", "目标", "未选择"),
         ]
-        for index, (key, title, value) in enumerate(definitions):
-            cell = QWidget()
-            cell_layout = QVBoxLayout(cell)
-            cell_layout.setContentsMargins(5, 1, 5, 1)
-            heading = QLabel(title)
-            heading.setStyleSheet("color:#8fa9b8;font-size:11px")
-            label = QLabel(value)
+        for key, title, value in definitions:
+            label = QLabel(f"{title}：{value}")
             label.setObjectName(f"status_{key}")
-            label.setStyleSheet("font-weight:600")
-            cell_layout.addWidget(heading)
-            cell_layout.addWidget(label)
-            layout.addWidget(cell, 0, index)
+            layout.addWidget(label)
             self.status_labels[key] = label
+        layout.addStretch(1)
+        udp_tip = "本机发送成功仅表示UDP sendto未抛出异常，不代表无人机端已经收到。当前Demo协议无ACK。"
+        self.status_labels["send"].setToolTip(udp_tip)
+        self.track_count_button = QPushButton("航迹 0")
+        self.track_count_button.setObjectName("trackCountButton")
+        self.runtime_check_button = QPushButton("运行检查")
+        self.runtime_check_button.setObjectName("runtimeCheckButton")
+        self.settings_button = QPushButton("系统设置")
+        self.settings_button.setObjectName("systemSettingsButton")
+        for button in (self.track_count_button, self.runtime_check_button, self.settings_button):
+            button.setMinimumHeight(32)
+            layout.addWidget(button)
+        self.quick_settings_button = self.settings_button
         return box
 
-    def _build_radar_panel(self) -> QWidget:
-        box = QGroupBox("离线二维雷达显示")
-        layout = QVBoxLayout(box)
-        range_row = QHBoxLayout()
-        range_row.addWidget(QLabel("固定量程："))
-        self.range_combo = QComboBox()
-        self.range_combo.setObjectName("rangeCombo")
-        for value, label in ((500, "500 m"), (1000, "1 km"), (2000, "2 km"), (5000, "5 km")):
-            self.range_combo.addItem(label, value)
-        self.range_combo.setCurrentIndex(self.range_combo.findData(self.settings.radar_display_range_m))
-        range_row.addWidget(self.range_combo)
-        note = QLabel("局部平面换算仅用于Demo展示")
-        note.setStyleSheet("color:#d3a84e")
-        range_row.addWidget(note)
-        range_row.addStretch()
-        layout.addLayout(range_row)
-        self.radar_display = RadarDisplayWidget()
-        self.radar_display.setObjectName("radarDisplay")
-        self.radar_display.set_range_m(self.settings.radar_display_range_m)
-        layout.addWidget(self.radar_display, 1)
-        return box
+    def _build_track_inspection_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.addWidget(self._build_target_details())
+        layout.addWidget(self._build_track_table(), 1)
+        return page
+
+    def _build_communication_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        details = QGroupBox("通信与运行状态")
+        grid = QGridLayout(details)
+        detail_definitions = [
+            ("radar_age", "雷达数据间隔", "--"),
+            ("radar_time", "最近雷达报文", "--"),
+            ("valid", "雷达有效帧", "0"),
+            ("invalid", "雷达错误帧", "0"),
+            ("ack", "接收确认", "未知（Demo协议无ACK）"),
+            ("sequence", "发送序号", "--"),
+            ("send_time", "最近本机发送", "--"),
+            ("frequency", "实际发送频率", "0.00 Hz"),
+            ("local_success", "本机发送成功", "0"),
+            ("local_failure", "本机发送失败", "0"),
+            ("map", "地图状态", "本地Demo地图"),
+            ("video", "视频状态", "未连接"),
+        ]
+        for index, (key, title, value) in enumerate(detail_definitions):
+            heading = QLabel(title)
+            heading.setObjectName("diagnosticCaption")
+            label = QLabel(value)
+            label.setObjectName(f"status_{key}")
+            row, column = divmod(index, 2)
+            grid.addWidget(heading, row, column * 2)
+            grid.addWidget(label, row, column * 2 + 1)
+            self.status_labels[key] = label
+        self.status_labels["local_success"].setToolTip(
+            "仅表示本机UDP sendto未抛出异常，不代表无人机已经接收。"
+        )
+        layout.addWidget(details)
+        lower = QHBoxLayout()
+        lower.addWidget(self._build_radar_info(), 1)
+        lower.addWidget(self._build_network_panel(), 2)
+        layout.addLayout(lower)
+        layout.addStretch(1)
+        return page
 
     def _build_track_table(self) -> QWidget:
         box = QGroupBox("航迹列表（内部始终按绝对编号关联）")
+        box.setMinimumHeight(160)
         layout = QVBoxLayout(box)
+        layout.setContentsMargins(7, 12, 7, 7)
+        layout.setSpacing(4)
         columns = [
             "显示编号", "绝对编号", "类型", "经度", "纬度", "高度m", "距离m",
             "方位°", "速度m/s", "状态", "最后更新", "丢失ms",
@@ -182,9 +232,20 @@ class GroundStationMainWindow(QMainWindow):
         self.track_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.track_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.track_table.setSortingEnabled(True)
+        self.track_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.track_table.setMinimumHeight(145)
+        self.track_table.setAlternatingRowColors(True)
         self.track_table.verticalHeader().setVisible(False)
-        self.track_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.track_table)
+        header = self.track_table.horizontalHeader()
+        header.setMinimumHeight(28)
+        header.setStretchLastSection(False)
+        for column in (0, 1, 2, 5, 9, 11):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        for column in (3, 4, 6, 7, 8, 10):
+            header.setSectionResizeMode(column, QHeaderView.Interactive)
+        for column, width in ((3, 125), (4, 125), (6, 82), (7, 72), (8, 82), (10, 165)):
+            self.track_table.setColumnWidth(column, width)
+        layout.addWidget(self.track_table, 1)
         return box
 
     def _build_radar_info(self) -> QWidget:
@@ -216,97 +277,63 @@ class GroundStationMainWindow(QMainWindow):
         form.addRow("丢失持续", self.target_labels["lost"])
         return box
 
-    def _build_mode_panel(self) -> QWidget:
-        box = QGroupBox("任务模式（地面站仅保存和发送模式）")
-        layout = QGridLayout(box)
-        self.mode_group = QButtonGroup(self)
-        self.mode_group.setExclusive(True)
-        self.mode_buttons: dict[MissionMode, QPushButton] = {}
-        for index, mode in enumerate(MissionMode):
-            button = QPushButton(f"{MODE_NAMES[mode]}  {int(mode)}")
-            button.setObjectName(f"modeButton{int(mode)}")
-            button.setCheckable(True)
-            self.mode_group.addButton(button, int(mode))
-            self.mode_buttons[mode] = button
-            layout.addWidget(button, index // 3, index % 3)
-        return box
-
     def _build_network_panel(self) -> QWidget:
         box = QGroupBox("网络与配置")
-        layout = QGridLayout(box)
-        self.radar_host = QLineEdit(self.settings.radar_listen_host)
-        self.radar_port = self._spin(1, 65535, self.settings.radar_listen_port)
-        self.radar_source_host = QLineEdit(self.settings.radar_source_host)
-        self.radar_source_host.setPlaceholderText("留空不过滤")
-        self.radar_source_port = self._spin(0, 65535, self.settings.radar_source_port)
-        self.drone_host = QLineEdit(self.settings.drone_host)
-        self.drone_port = self._spin(1, 65535, self.settings.drone_port)
-        self.drone_id = QDoubleSpinBox()
-        self.drone_id.setDecimals(0)
-        self.drone_id.setRange(0, 0xFFFFFFFF)
-        self.drone_id.setValue(self.settings.drone_id)
-        self.frequency = QDoubleSpinBox()
-        self.frequency.setRange(0.1, 100.0)
-        self.frequency.setDecimals(1)
-        self.frequency.setValue(self.settings.send_frequency_hz)
-        self.timeout_ms = self._spin(100, 60000, self.settings.track_stale_timeout_ms)
-        self.byte_order = QComboBox()
-        self.byte_order.addItems(["little", "big"])
-        self.byte_order.setCurrentText(self.settings.radar_byte_order)
-        self.single_frame = QLabel("是 — Demo临时假设，尚未经过真实抓包验证")
-        apply_note = QLabel("配置在启动对应网络时应用；运行中修改需先停止")
-        apply_note.setStyleSheet("color:#8fa9b8")
-        fields = [
-            ("雷达监听IP", self.radar_host), ("雷达监听端口", self.radar_port),
-            ("来源IP过滤", self.radar_source_host), ("来源端口过滤", self.radar_source_port),
-            ("无人机目标IP", self.drone_host), ("无人机目标端口", self.drone_port),
-            ("无人机ID", self.drone_id), ("发送频率Hz", self.frequency),
-            ("航迹超时ms（Demo假设）", self.timeout_ms), ("雷达字节序", self.byte_order),
-            ("一报一帧", self.single_frame),
-        ]
-        for row, (label, widget) in enumerate(fields):
-            layout.addWidget(QLabel(label), row, 0)
-            layout.addWidget(widget, row, 1)
+        layout = QVBoxLayout(box)
+        form = QFormLayout()
+        self.config_summary: dict[str, QLabel] = {
+            "radar": QLabel(), "source": QLabel(), "drone": QLabel(), "frequency": QLabel(),
+            "timeout": QLabel(), "byte_order": QLabel(),
+        }
+        form.addRow("雷达监听", self.config_summary["radar"])
+        form.addRow("来源过滤", self.config_summary["source"])
+        form.addRow("无人机目标", self.config_summary["drone"])
+        form.addRow("发送频率", self.config_summary["frequency"])
+        form.addRow("航迹超时", self.config_summary["timeout"])
+        form.addRow("雷达字节序", self.config_summary["byte_order"])
+        layout.addLayout(form)
+        self.network_settings_button = QPushButton("网络与配置...")
+        self.network_settings_button.setObjectName("networkSettingsButton")
+        self.network_settings_button.setMinimumHeight(32)
+        layout.addWidget(self.network_settings_button)
         self.radar_toggle = QPushButton("启动雷达监听")
         self.radar_toggle.setObjectName("radarToggleButton")
         self.send_toggle = QPushButton("启动无人机发送")
         self.send_toggle.setObjectName("sendToggleButton")
-        layout.addWidget(self.radar_toggle, len(fields), 0)
-        layout.addWidget(self.send_toggle, len(fields), 1)
-        layout.addWidget(apply_note, len(fields) + 1, 0, 1, 2)
+        self.send_toggle.setToolTip(
+            "本机发送成功仅表示UDP sendto未抛出异常；当前Demo协议无ACK，无法确认无人机已接收。"
+        )
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.radar_toggle)
+        buttons.addWidget(self.send_toggle)
+        layout.addLayout(buttons)
+        self._update_config_summary()
         return box
 
-    def _build_logs(self) -> QWidget:
-        self.log_tabs = QTabWidget()
-        self.log_tabs.setObjectName("logTabs")
+    def _create_logs(self) -> None:
         self.logs: dict[str, CappedLogEdit] = {}
-        for key, title in (
-            ("runtime", "运行日志"), ("radar", "雷达报文"), ("send", "无人机发送"),
-            ("hex", "十六进制"), ("protocol", "协议错误"),
-        ):
+        for key in ("runtime", "radar", "send", "hex", "protocol"):
             edit = CappedLogEdit(self.settings.log_max_lines)
             edit.setObjectName(f"log_{key}")
             self.logs[key] = edit
-            self.log_tabs.addTab(edit, title)
-        self.log_tabs.setMaximumHeight(220)
-        return self.log_tabs
-
-    @staticmethod
-    def _spin(minimum: int, maximum: int, value: int) -> QSpinBox:
-        spin = QSpinBox()
-        spin.setRange(minimum, maximum)
-        spin.setValue(value)
-        return spin
 
     def _connect_signals(self) -> None:
-        self.range_combo.currentIndexChanged.connect(
-            lambda: self.radar_display.set_range_m(int(self.range_combo.currentData()))
+        self.workspace.target_clicked.connect(self.select_target)
+        self.workspace.map_status_changed.connect(
+            lambda text: self.status_labels["map"].setText(text)
         )
-        self.radar_display.track_clicked.connect(self.select_target)
+        self.workspace.view_changed.connect(
+            lambda text: self._append_log("runtime", f"主视角切换：{text}")
+        )
         self.track_table.itemSelectionChanged.connect(self._table_selection_changed)
         self.mode_group.buttonClicked[int].connect(self._mode_clicked)
         self.radar_toggle.clicked.connect(self._toggle_radar)
         self.send_toggle.clicked.connect(self._toggle_sending)
+        self.settings_button.clicked.connect(self._open_settings)
+        self.network_settings_button.clicked.connect(self._open_settings)
+        self.track_count_button.clicked.connect(self.runtime_inspection.show_track_page)
+        self.runtime_check_button.clicked.connect(self._open_runtime_inspection)
+        self.settings_dialog.settings_applied.connect(self._apply_settings)
         self.controller.tracks_changed.connect(self._update_tracks)
         self.controller.radar_state_changed.connect(self._update_radar_state)
         self.controller.radar_status_changed.connect(self._update_radar_status)
@@ -318,6 +345,11 @@ class GroundStationMainWindow(QMainWindow):
         self.controller.mission_mode_changed.connect(self._mission_mode_changed)
         self.controller.selection_changed.connect(self._sync_selection)
         self.controller.runtime_log.connect(lambda text: self._append_log("runtime", text))
+
+    def _open_runtime_inspection(self) -> None:
+        self.runtime_inspection.show()
+        self.runtime_inspection.raise_()
+        self.runtime_inspection.activateWindow()
 
     def _toggle_radar(self) -> None:
         if self.controller.radar_receiver.running:
@@ -352,35 +384,84 @@ class GroundStationMainWindow(QMainWindow):
         except (ValueError, RuntimeError, OSError) as error:
             self._append_log("protocol", str(error))
 
+    def _open_settings(self) -> None:
+        self.settings_dialog.set_running_state(
+            radar_listening=self.controller.radar_receiver.running,
+            sending=self.controller.sending,
+        )
+        self.settings_dialog.show()
+        self.settings_dialog.raise_()
+        self.settings_dialog.activateWindow()
+
+    def _apply_settings(self) -> None:
+        self.controller.repository.set_stale_timeout_ms(self.timeout_ms.value())
+        online = self.settings_dialog.map_mode.currentData() == "online"
+        self.workspace.set_online_map(online)
+        self.workspace.set_tile_url(self.settings_dialog.map_tile_url.text().strip())
+        self.workspace.set_history_limit(self.settings_dialog.map_history_points.value())
+        video_config = VideoSourceConfig(
+            mode=str(self.settings_dialog.video_mode.currentData()),
+            rtsp_url=self.settings_dialog.video_rtsp_url.text().strip(),
+        )
+        self.workspace.configure_video(video_config)
+        self.status_labels["video"].setText(self.workspace.video_main.message.text())
+        self._update_config_summary()
+        messages = ["航迹超时阈值、地图与视频展示设置已立即应用"]
+        if self.controller.radar_receiver.running:
+            messages.append("雷达监听相关设置需停止并重新启动监听后生效")
+        if self.controller.sending:
+            messages.append("无人机目标与频率需停止并重新启动发送后生效")
+        self._append_log("runtime", "；".join(messages))
+
+    def _update_config_summary(self) -> None:
+        if not hasattr(self, "config_summary"):
+            return
+        self.config_summary["radar"].setText(
+            f"{self.radar_host.text().strip()}:{self.radar_port.value()}"
+        )
+        source_host = self.radar_source_host.text().strip() or "不限"
+        source_port = self.radar_source_port.value()
+        self.config_summary["source"].setText(
+            source_host if source_port == 0 else f"{source_host}:{source_port}"
+        )
+        self.config_summary["drone"].setText(
+            f"{self.drone_host.text().strip()}:{self.drone_port.value()}"
+        )
+        self.config_summary["frequency"].setText(f"{self.frequency.value():.1f} Hz")
+        self.config_summary["timeout"].setText(f"{self.timeout_ms.value()} ms（Demo假设）")
+        self.config_summary["byte_order"].setText(self.byte_order.currentText())
+
     def _mode_clicked(self, mode_value: int) -> None:
-        self.controller.set_mode(MissionMode(mode_value))
+        mode = MissionMode(mode_value)
+        if mode is MissionMode.TRACK and self.controller.selection.selected_absolute_id is None:
+            self.workspace.show_notification("尚未选择目标；跟踪模式将不包含有效目标坐标")
+        self.controller.set_mode(mode)
 
     def _mission_mode_changed(self, mode: MissionMode) -> None:
         self._set_mode_checked(mode)
-        self.status_labels["mode"].setText(f"{MODE_NAMES[mode]}({int(mode)})")
+        self.status_labels["mode"].setText(f"模式：{MODE_NAMES[mode]}")
+        self.workspace.show_notification(f"任务模式已切换为{MODE_NAMES[mode]}")
         self._append_log("runtime", f"任务模式切换为 {MODE_NAMES[mode]}({int(mode)})，请求立即发送")
 
     def _set_mode_checked(self, mode: MissionMode) -> None:
         self.mode_buttons[mode].setChecked(True)
 
     def _update_radar_status(self, status: str) -> None:
-        self.status_labels["radar"].setText(status)
-        running = status in ("启动中", "接收中", "停止中") and status != "已停止"
+        self.status_labels["radar"].setText(f"雷达监听：{status}")
+        running = status in ("启动中", "监听中", "停止中")
         self.radar_toggle.setText("停止雷达监听" if running else "启动雷达监听")
-        for widget in (
-            self.radar_host, self.radar_port, self.radar_source_host,
-            self.radar_source_port, self.byte_order,
-        ):
-            widget.setEnabled(not running)
+        self.settings_dialog.set_running_state(
+            radar_listening=running, sending=self.controller.sending
+        )
 
     def _update_send_status(self, status: str) -> None:
-        self.status_labels["send"].setText(status)
+        display = f"{status}（无接收确认）"
+        self.status_labels["send"].setText(f"无人机UDP：{display}")
         self.send_toggle.setText("停止无人机发送" if status == "发送中" else "启动无人机发送")
         running = status == "发送中"
-        for widget in (
-            self.drone_host, self.drone_port, self.drone_id, self.frequency, self.timeout_ms,
-        ):
-            widget.setEnabled(not running)
+        self.settings_dialog.set_running_state(
+            radar_listening=self.controller.radar_receiver.running, sending=running
+        )
 
     def _update_radar_state(self, frame: object) -> None:
         radar = frame.radar  # type: ignore[attr-defined]
@@ -388,16 +469,20 @@ class GroundStationMainWindow(QMainWindow):
         self.radar_labels["lat"].setText(f"{radar.latitude_deg:.5f}°")
         self.radar_labels["alt"].setText(f"{radar.altitude_m} m")
         self.radar_labels["sat"].setText(str(radar.satellite_count))
-        timestamp = self._format_unix_ms(self.controller.last_radar_unix_ms)
+        timestamp = self._format_unix_ms(self.controller.last_radar_state_unix_ms)
         self.radar_labels["updated"].setText(timestamp)
-        self.radar_display.set_radar_position(radar.longitude_deg, radar.latitude_deg)
+        self.workspace.set_home(radar.longitude_deg, radar.latitude_deg)
 
     def _update_tracks(self, tracks: object) -> None:
         self._tracks = tuple(tracks)  # type: ignore[arg-type]
+        self.track_count_button.setText(f"航迹 {len(self._tracks)}")
         selected = self.controller.selection.selected_absolute_id
-        self.radar_display.set_tracks(self._tracks)
-        self.radar_display.set_selected_absolute_id(selected)
+        self.workspace.update_tracks(self._tracks)
+        self.workspace.set_selected_track(selected)
+        vertical_position = self.track_table.verticalScrollBar().value()
+        horizontal_position = self.track_table.horizontalScrollBar().value()
         self._updating_table = True
+        signals_were_blocked = self.track_table.blockSignals(True)
         sort_column = self.track_table.horizontalHeader().sortIndicatorSection()
         sort_order = self.track_table.horizontalHeader().sortIndicatorOrder()
         self.track_table.setSortingEnabled(False)
@@ -425,20 +510,26 @@ class GroundStationMainWindow(QMainWindow):
                 item.setData(Qt.UserRole, track.absolute_id)
                 self.track_table.setItem(row, column, item)
         self.track_table.setSortingEnabled(True)
-        self.track_table.sortItems(sort_column, sort_order)
+        if sort_column >= 0:
+            self.track_table.sortItems(sort_column, sort_order)
+        self._apply_table_selection(selected, scroll=False)
+        self.track_table.verticalScrollBar().setValue(vertical_position)
+        self.track_table.horizontalScrollBar().setValue(horizontal_position)
+        self.track_table.blockSignals(signals_were_blocked)
         self._updating_table = False
-        self._sync_selection(selected)
         self._update_target_details()
 
     def _table_selection_changed(self) -> None:
         if self._updating_table:
             return
-        row = self.track_table.currentRow()
+        selected_rows = self.track_table.selectionModel().selectedRows()
+        row = selected_rows[0].row() if selected_rows else -1
         item = self.track_table.item(row, 0) if row >= 0 else None
         if item is not None:
             self.select_target(int(item.data(Qt.UserRole)))
 
     def select_target(self, absolute_id: int) -> None:
+        scroll_after_selection = False
         try:
             decision = self.controller.request_selection(absolute_id)
         except KeyError as error:
@@ -449,10 +540,21 @@ class GroundStationMainWindow(QMainWindow):
             if self._confirm_target_switch(decision.confirmation):
                 self.controller.confirm_selection(decision.confirmation)
                 self._append_log("runtime", "已确认切换目标，触发立即发送")
+                self.workspace.show_notification(
+                    f"已切换至航迹{decision.confirmation.new_target.display_id}"
+                )
+                scroll_after_selection = True
             else:
                 self.controller.cancel_selection(decision.confirmation)
                 self._append_log("runtime", "已取消目标切换，保持原目标")
-        self._sync_selection(self.controller.selection.selected_absolute_id)
+        elif decision.status is SelectionStatus.SELECTED:
+            selected_track = self.controller.selection.selected_track()
+            if selected_track is not None:
+                self.workspace.show_notification(f"已选择航迹{selected_track.display_id}")
+            scroll_after_selection = True
+        self._sync_selection(
+            self.controller.selection.selected_absolute_id, scroll=scroll_after_selection
+        )
 
     def _confirm_target_switch(self, confirmation: TargetSwitchConfirmation) -> bool:
         old = confirmation.old_target
@@ -470,22 +572,45 @@ class GroundStationMainWindow(QMainWindow):
         box.setDefaultButton(QMessageBox.Cancel)
         return box.exec_() == QMessageBox.Yes
 
-    def _sync_selection(self, absolute_id: object) -> None:
+    def _sync_selection(self, absolute_id: object, *, scroll: bool = False) -> None:
         selected = None if absolute_id is None else int(absolute_id)
-        self.radar_display.set_selected_absolute_id(selected)
+        self.workspace.set_selected_track(selected)
+        selected_track = self.controller.selection.selected_track()
+        self.status_labels["target"].setText(
+            "目标：未选择"
+            if selected_track is None
+            else f"目标：航迹{selected_track.display_id}"
+        )
+        vertical_position = self.track_table.verticalScrollBar().value()
+        horizontal_position = self.track_table.horizontalScrollBar().value()
         self._updating_table = True
-        self.track_table.clearSelection()
-        if selected is not None:
-            for row in range(self.track_table.rowCount()):
-                item = self.track_table.item(row, 0)
-                if item is not None and int(item.data(Qt.UserRole)) == selected:
-                    self.track_table.selectRow(row)
-                    break
+        self._apply_table_selection(selected, scroll=scroll)
+        if not scroll:
+            self.track_table.verticalScrollBar().setValue(vertical_position)
+            self.track_table.horizontalScrollBar().setValue(horizontal_position)
         self._updating_table = False
         self._update_target_details()
 
+    def _apply_table_selection(self, absolute_id: int | None, *, scroll: bool) -> None:
+        selection_model = self.track_table.selectionModel()
+        selection_model.clearSelection()
+        if absolute_id is None:
+            return
+        for row in range(self.track_table.rowCount()):
+            item = self.track_table.item(row, 0)
+            if item is None or int(item.data(Qt.UserRole)) != absolute_id:
+                continue
+            index = self.track_table.model().index(row, 0)
+            selection_model.select(
+                index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows
+            )
+            if scroll:
+                self.track_table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+            return
+
     def _update_target_details(self) -> None:
         target = self.controller.selection.selected_track()
+        self.workspace.set_target_summary(target)
         if target is None or target.last_valid_coordinate is None:
             self.target_labels["valid"].setText("目标无效（尚未选择或无有效坐标）")
             for key in ("display", "absolute", "coordinate", "timestamp", "realtime", "lost"):
@@ -514,19 +639,31 @@ class GroundStationMainWindow(QMainWindow):
 
     def _send_error(self, error: SendError) -> None:
         self._append_log("protocol", json.dumps(error.to_dict(), ensure_ascii=False))
+        self.workspace.show_notification("无人机UDP本机发送失败")
 
     def _protocol_error(self, error: object) -> None:
         self._append_log("protocol", json.dumps(error, ensure_ascii=False, default=str))
 
     def _refresh_ui_tick(self) -> None:
         self.controller.refresh_tracks()
+        data_status = self.controller.radar_data_status()
+        data_age = self.controller.radar_data_age_seconds()
+        self.status_labels["radar_data"].setText(f"雷达数据：{data_status}")
+        if data_status != self._last_radar_data_status:
+            if data_status == "数据超时":
+                self.workspace.show_notification("雷达数据超时，航迹将按规则转为丢失")
+            elif data_status == "数据实时" and self._last_radar_data_status == "数据超时":
+                self.workspace.show_notification("雷达数据已恢复")
+            self._last_radar_data_status = data_status
+        self.status_labels["radar_age"].setText(
+            "--" if data_age is None else f"最近报文距今 {data_age:.1f} 秒"
+        )
         self.status_labels["valid"].setText(str(self.controller.valid_radar_frames))
         self.status_labels["invalid"].setText(str(self.controller.invalid_radar_frames))
         self.status_labels["radar_time"].setText(self._format_unix_ms(self.controller.last_radar_unix_ms))
         self.status_labels["frequency"].setText(f"{self.controller.actual_send_frequency_hz:.2f} Hz")
-        self.status_labels["success"].setText(
-            f"{self.controller.send_success_count} / {self.controller.send_failure_count}"
-        )
+        self.status_labels["local_success"].setText(str(self.controller.send_success_count))
+        self.status_labels["local_failure"].setText(str(self.controller.send_failure_count))
 
     def _append_log(self, key: str, text: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -536,25 +673,21 @@ class GroundStationMainWindow(QMainWindow):
     def _format_unix_ms(value: int | None) -> str:
         if value is None:
             return "--"
+        # 2000-01-01之前的值在本项目中视为错误时钟域，避免把单调时钟显示成1970日期。
+        if value < 946_684_800_000:
+            return "时间无效（非Unix墙钟）"
         return datetime.fromtimestamp(value / 1000).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
     def closeEvent(self, event: object) -> None:
         self._timer.stop()
-        self.closed_cleanly = self.controller.shutdown()
+        self.runtime_inspection.close()
+        self.settings_dialog.close()
+        workspace_ok = self.workspace.shutdown()
+        controller_ok = self.controller.shutdown()
+        self.closed_cleanly = workspace_ok and controller_ok
         event.accept()  # type: ignore[attr-defined]
 
     def _apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow,QWidget { background:#13212c; color:#e7eef2; }
-            QGroupBox { border:1px solid #365263; border-radius:4px; margin-top:7px; padding-top:8px; font-weight:600; }
-            QGroupBox::title { subcontrol-origin:margin; left:8px; padding:0 4px; }
-            QPushButton { background:#27485c; border:1px solid #52758a; padding:6px; border-radius:3px; }
-            QPushButton:hover { background:#326078; }
-            QPushButton:checked { background:#bb7228; border-color:#ffc16b; }
-            QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox,QTableWidget,QPlainTextEdit,QTabWidget::pane {
-                background:#0e1a23; border:1px solid #365263; selection-background-color:#8c5a27;
-            }
-            QHeaderView::section { background:#203746; color:#e7eef2; padding:4px; border:1px solid #365263; }
-            """
-        )
+        self.setStyleSheet(DARK_THEME_QSS)
+        self.settings_dialog.setStyleSheet(DARK_THEME_QSS)
+        self.runtime_inspection.setStyleSheet(DARK_THEME_QSS)

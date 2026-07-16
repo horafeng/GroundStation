@@ -18,6 +18,7 @@
 ## 目录边界
 
 - D:\Drone 是只读资料目录。
+- D:\QGroundControl\qgroundcontrol-master 是只读功能参考目录。
 - 禁止修改、删除、移动或重命名 D:\Drone 中的任何文件。
 - D:\GroundStation 是唯一允许写入代码、文档、测试和配置的目录。
 - 禁止在 D:\GroundStation 之外生成项目文件。
@@ -206,8 +207,9 @@ Demo 协议至少预留：
 - 自动目标重关联
 - 在线地图
 
-当前已完成PyQt5 Widgets Demo、QThread雷达UDP接收、离线固定量程雷达显示和
-端到端模拟联调。下一阶段若接入真实设备，仍必须保持UI、协议、航迹和网络解耦，
+当前已完成PyQt5 Widgets Demo、QThread雷达UDP接收、交互式地图主视角和
+端到端模拟联调。地图支持在线标准瓦片与本地Demo降级；下一阶段若接入真实设备，
+仍必须保持UI、协议、航迹和网络解耦，
 不得把当前Demo显示换算或临时协议提升为正式设备事实。
 
 ## 已确认的核心实现规则
