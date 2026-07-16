@@ -52,7 +52,8 @@ class RadarDisplayWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(420, 360)
+        # 保持足够的绘制空间，同时允许1366×768窗口通过Splitter调整雷达盘与航迹表。
+        self.setMinimumSize(420, 200)
         self.setToolTip("经纬度到局部平面的近似换算仅用于Demo展示，不修改发送坐标")
         self._range_m = 1000
         self._radar_position: tuple[float, float] | None = None

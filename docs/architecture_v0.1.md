@@ -175,3 +175,10 @@ class DroneProtocolEncoder(Protocol):
 - 未校验校验和/帧尾的宽松解析。
 - 把雷达目标高度直接加 Home 海拔。
 - 把 UI、协议编码和网络发送放在同一类中。
+# UI状态与时钟补充（v0.1）
+
+UI展示层不把UDP Socket监听、雷达数据新鲜度和无人机接收确认混为一个状态。控制器保留
+`received_unix_ms`用于可见日期和MissionSnapshot坐标时间戳；保留
+`received_monotonic`用于航迹超时、丢失持续时间和发送调度。单调时钟值不得格式化为
+日期时间。雷达监听中但未收到报文或报文超时均是允许状态；当前Demo无人机协议没有ACK，
+因此UDP本机发送成功不代表无人机接收成功。
