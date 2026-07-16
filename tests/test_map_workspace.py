@@ -119,6 +119,58 @@ def test_map_and_video_main_views_switch_without_decoder(qtbot) -> None:
     assert workspace.shutdown()
 
 
+def test_mission_controls_are_vertical_icon_text_overlay(qtbot) -> None:
+    workspace = MainWorkspace()
+    qtbot.addWidget(workspace)
+    workspace.resize(1000, 700)
+    workspace.show()
+    QApplication.processEvents()
+    buttons = list(workspace.mode_buttons.values())
+    assert [button.text() for button in buttons] == ["待命", "起飞", "跟踪", "返航", "降落"]
+    assert all(not button.icon().isNull() for button in buttons)
+    assert all(button.parent() is workspace.mission_controls for button in buttons)
+    assert all(first.y() < second.y() for first, second in zip(buttons, buttons[1:]))
+    assert workspace.mission_controls.geometry().left() >= workspace.rect().left()
+
+
+def test_target_card_click_expand_is_stable_across_refresh_and_view_switch(qtbot) -> None:
+    repository, tracks = snapshots()
+    workspace = MainWorkspace()
+    qtbot.addWidget(workspace)
+    workspace.resize(1000, 700)
+    workspace.show()
+    target = tracks[0]
+    workspace.set_target_summary(target)
+    QApplication.processEvents()
+    card = workspace.target_card
+    details_identity = id(card.details)
+    assert not card.expanded
+
+    qtbot.mouseClick(card, Qt.LeftButton)
+    QApplication.processEvents()
+    assert card.expanded and card.details.isVisible()
+    assert id(card.details) == details_identity
+    workspace.show_video_view()
+    workspace.set_target_summary(target)
+    QApplication.processEvents()
+    assert card.expanded and card.details.isVisible()
+
+    lost = repository.refresh(now_monotonic=102.3)[0]
+    coordinate_timestamp = card.detail_labels["timestamp"].text()
+    workspace.set_target_summary(lost)
+    QApplication.processEvents()
+    assert card.expanded
+    assert "最后有效坐标" in card.detail_labels["status"].text()
+    assert card.detail_labels["timestamp"].text() == coordinate_timestamp
+    assert workspace.rect().contains(card.geometry())
+
+    qtbot.mouseClick(card, Qt.LeftButton)
+    QApplication.processEvents()
+    assert not card.expanded and not card.details.isVisible()
+    assert id(card.details) == details_identity
+    assert workspace.shutdown()
+
+
 def test_rtsp_placeholder_does_not_claim_connection(qtbot) -> None:
     workspace = MainWorkspace()
     qtbot.addWidget(workspace)
@@ -167,9 +219,9 @@ def test_map_is_dominant_at_supported_window_sizes(qtbot) -> None:
         window.resize(*size)
         window.show()
         QApplication.processEvents()
-        business_sizes = window.business_splitter.sizes()
-        assert business_sizes[0] > business_sizes[1]
-        assert window.workspace.width() >= 420
-        assert window.track_table.height() > 0
-        assert window.log_tabs.height() > 0
+        assert window.workspace.width() >= window.centralWidget().width() - 24
+        assert window.workspace.height() >= window.centralWidget().height() - 100
+        assert not window.runtime_inspection.isVisible()
+        assert window.workspace.mission_controls.isVisible()
+        assert window.workspace.target_card.isVisible()
     window.close()

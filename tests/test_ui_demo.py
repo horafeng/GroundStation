@@ -74,14 +74,17 @@ def test_main_window_can_create_and_close_offscreen(qtbot) -> None:
     assert window.closed_cleanly
 
 
-def test_layout_gives_logs_and_track_table_expandable_space(qtbot) -> None:
+def test_main_canvas_is_not_reduced_by_tracks_logs_or_diagnostics(qtbot) -> None:
     window = make_window(qtbot)
     QApplication.processEvents()
-    assert window.main_splitter.count() == 3
-    assert window.log_tabs.minimumHeight() >= 140
-    assert window.business_splitter.count() == 2
-    assert window.right_splitter.count() == 4
+    assert window.centralWidget().layout().count() == 2
     assert window.workspace.stack.count() == 2
+    assert window.workspace.minimumHeight() >= 480
+    assert not window.runtime_inspection.isVisible()
+    assert [
+        window.runtime_inspection.tabs.tabText(index)
+        for index in range(window.runtime_inspection.tabs.count())
+    ] == ["航迹", "通信", "运行日志", "报文", "协议错误"]
     assert window.track_table.minimumHeight() >= 145
     assert window.track_table.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
     assert window.findChild(QPushButton, "locateCurrentTargetButton") is None
@@ -89,12 +92,27 @@ def test_layout_gives_logs_and_track_table_expandable_space(qtbot) -> None:
     assert window.config_summary["radar"].text()
     assert window.config_summary["source"].text()
     assert window.settings_button.minimumHeight() >= 32
+    assert window.runtime_check_button.text() == "运行检查"
     window.close()
 
 
 def test_log_tab_bar_renders_with_dark_selected_and_unselected_tabs(qtbot) -> None:
     window = make_window(qtbot)
     assert_tab_bar_uses_dark_background(window.log_tabs)
+    window.close()
+
+
+def test_runtime_inspection_opens_non_modal_and_keeps_main_window_available(qtbot) -> None:
+    window = make_window(qtbot)
+    window.runtime_check_button.click()
+    qtbot.waitUntil(window.runtime_inspection.isVisible)
+    assert not window.runtime_inspection.isModal()
+    assert window.isEnabled()
+    window.track_count_button.click()
+    assert window.runtime_inspection.tabs.currentIndex() == 0
+    window.runtime_inspection.close()
+    assert not window.runtime_inspection.isVisible()
+    assert window.controller is not None
     window.close()
 
 
@@ -114,7 +132,7 @@ def test_valid_udp_frame_updates_radar_and_track_table(qtbot) -> None:
     window = make_window(qtbot)
     port = window.radar_port.value()
     qtbot.mouseClick(window.radar_toggle, Qt.LeftButton)
-    qtbot.waitUntil(lambda: window.status_labels["radar"].text() == "监听中")
+    qtbot.waitUntil(lambda: window.status_labels["radar"].text().endswith("监听中"))
     send_udp(port, scenario_datagram("multi-moving", tick=0))
     qtbot.waitUntil(lambda: window.controller.valid_radar_frames == 1)
     assert window.track_table.rowCount() == 4
@@ -127,7 +145,7 @@ def test_bad_checksum_never_enters_track_repository(qtbot) -> None:
     window = make_window(qtbot)
     port = window.radar_port.value()
     window.radar_toggle.click()
-    qtbot.waitUntil(lambda: window.status_labels["radar"].text() == "监听中")
+    qtbot.waitUntil(lambda: window.status_labels["radar"].text().endswith("监听中"))
     send_udp(port, scenario_datagram("bad-checksum"))
     qtbot.waitUntil(lambda: window.controller.invalid_radar_frames == 1)
     assert window.controller.repository.all() == ()
@@ -282,7 +300,7 @@ def test_close_window_stops_threads_sockets_and_port_rebinds(qtbot) -> None:
     drone_port = free_udp_port()
     window = make_window(qtbot, radar_listen_port=radar_port, drone_port=drone_port)
     window.radar_toggle.click()
-    qtbot.waitUntil(lambda: window.status_labels["radar"].text() == "监听中")
+    qtbot.waitUntil(lambda: window.status_labels["radar"].text().endswith("监听中"))
     window.send_toggle.click()
     qtbot.waitUntil(lambda: window.controller.sending)
     window.close()
@@ -414,14 +432,14 @@ def test_listener_remains_active_while_radar_data_times_out(qtbot) -> None:
     window = make_window(qtbot, track_stale_timeout_ms=100)
     port = window.radar_port.value()
     window.radar_toggle.click()
-    qtbot.waitUntil(lambda: window.status_labels["radar"].text() == "监听中")
+    qtbot.waitUntil(lambda: window.status_labels["radar"].text().endswith("监听中"))
     send_udp(port, scenario_datagram("one"))
     qtbot.waitUntil(lambda: window.controller.valid_radar_frames == 1)
     window.select_target(100_007)
     invalid_before = window.controller.invalid_radar_frames
-    qtbot.waitUntil(lambda: window.status_labels["radar_data"].text() == "数据超时", timeout=1200)
+    qtbot.waitUntil(lambda: window.status_labels["radar_data"].text().endswith("数据超时"), timeout=1200)
     assert window.controller.radar_receiver.running
-    assert window.status_labels["radar"].text() == "监听中"
+    assert window.status_labels["radar"].text().endswith("监听中")
     assert window.controller.invalid_radar_frames == invalid_before
     selected = window.controller.selection.selected_track()
     assert selected is not None and not selected.is_realtime

@@ -52,8 +52,8 @@ class MapWidget(QWidget):
         row.addWidget(self.home_button)
         row.addWidget(self.zoom_in_button)
         row.addWidget(self.zoom_out_button)
-        layout.addWidget(controls, 0, 0, Qt.AlignRight | Qt.AlignTop)
-        layout.addWidget(self.status_label, 0, 0, Qt.AlignLeft | Qt.AlignTop)
+        layout.addWidget(controls, 0, 0, Qt.AlignRight | Qt.AlignBottom)
+        layout.addWidget(self.status_label, 0, 0, Qt.AlignHCenter | Qt.AlignBottom)
 
     def set_home(self, longitude_deg: float, latitude_deg: float) -> None:
         first_home = self.model.home is None

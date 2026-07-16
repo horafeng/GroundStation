@@ -30,6 +30,20 @@ QScrollBar::handle { background:#456779; border:2px solid #10212b; border-radius
 QScrollBar::handle:hover { background:#5c879c; }
 QScrollBar::add-line, QScrollBar::sub-line { width:0; height:0; }
 QSplitter::handle { background:#365263; }
+#compactStatusBar { background:#101c25; border:1px solid #365263; border-radius:4px; }
+#compactStatusBar QLabel { color:#dce8ed; font-weight:600; }
+#missionControlOverlay { background:rgba(8,20,27,218); border:1px solid #49697a; border-radius:6px; }
+#missionControlOverlay QPushButton { min-width:64px; text-align:left; padding:7px 9px; }
+#targetSummaryCard { background:rgba(8,20,27,225); border:1px solid #49697a; border-radius:6px; }
+#targetCardTitle { color:#ffffff; font-size:15px; font-weight:700; }
+#targetCardState { color:#69d89c; font-weight:700; }
+#targetCardState[lost="true"] { color:#f1ad58; }
+#targetCardCompact { color:#dce8ed; font-weight:600; }
+#targetCardCaption { color:#8fa9b8; }
+#targetCardToggleHint { color:#f0a34b; }
+#operationToast { background:rgba(15,29,38,235); color:#ffffff; border:1px solid #e3943a; border-radius:4px; padding:9px 16px; }
+#runtimeInspectionDialog QTabWidget::pane { background:#0e1a23; }
+#diagnosticCaption { color:#8fa9b8; }
 #mapStatusLabel { background:rgba(8,20,27,205); padding:6px; border:1px solid #365263; }
 #mapControls { background:rgba(8,20,27,180); border:1px solid #365263; }
 #pictureInPicture { background:#0b171e; border:2px solid #e3943a; }
